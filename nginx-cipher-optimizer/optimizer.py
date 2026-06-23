@@ -14,26 +14,28 @@ from typing import List, Tuple, Optional
 
 # 推荐的配置
 RECOMMENDED_PROTOCOLS = "TLSv1.2 TLSv1.3"
+RECOMMENDED_ECDH_CURVE = "X25519:secp256r1:secp384r1"
 
-# TLSv1.2 加密套件（nginx 格式）
+# TLSv1.2 加密套件（nginx 格式）- 按效率从高到低
 TLS12_CIPHERS_NGINX = [
     "ECDHE-ECDSA-AES128-GCM-SHA256",
-    "ECDHE-ECDSA-AES256-GCM-SHA384",
     "ECDHE-RSA-AES128-GCM-SHA256",
+    "ECDHE-ECDSA-CHACHA20-POLY1305",
+    "ECDHE-RSA-CHACHA20-POLY1305",
+    "ECDHE-ECDSA-AES256-GCM-SHA384",
     "ECDHE-RSA-AES256-GCM-SHA384",
-    "ECDHE-RSA-CHACHA20-POLY1305-SHA256",
-    "ECDHE-ECDSA-CHACHA20-POLY1305-SHA256",
 ]
 
-# TLSv1.3 加密套件（nginx 格式）
+# TLSv1.3 加密套件（nginx 格式）- 按效率从高到低
 TLS13_CIPHERS_NGINX = [
-    "TLS-AES-128-GCM-SHA256",
-    "TLS-AES-256-GCM-SHA384",
-    "TLS-CHACHA20-POLY1305-SHA256",
+    "TLS_AES_128_GCM_SHA256",
+    "TLS_AES_256_GCM_SHA384",
+    "TLS_CHACHA20_POLY1305_SHA256",
 ]
 
-# 完整的加密套件字符串
-RECOMMENDED_CIPHERS = ":".join(TLS12_CIPHERS_NGINX + TLS13_CIPHERS_NGINX)
+# 完整的配置
+RECOMMENDED_CIPHERS_TLS12 = ":".join(TLS12_CIPHERS_NGINX)
+RECOMMENDED_CIPHERSUITES_TLS13 = ":".join(TLS13_CIPHERS_NGINX)
 
 
 def find_nginx_conf() -> Optional[str]:
@@ -55,6 +57,8 @@ def parse_nginx_config(file_path: str) -> dict:
         'ssl_protocols': None,
         'ssl_ciphers': None,
         'ssl_prefer_server_ciphers': None,
+        'ssl_ecdh_curve': None,
+        'ssl_conf_command_ciphersuites': None,
         'blocks': [],  # 存储找到配置的块位置
     }
 
@@ -67,7 +71,7 @@ def parse_nginx_config(file_path: str) -> dict:
         if protocols_match:
             result['ssl_protocols'] = protocols_match.group(1).strip()
 
-        # 查找 ssl_ciphers
+        # 查找 ssl_ciphers (TLS 1.2)
         ciphers_match = re.search(r'ssl_ciphers\s+([^;]+);', content)
         if ciphers_match:
             result['ssl_ciphers'] = ciphers_match.group(1).strip()
@@ -76,6 +80,16 @@ def parse_nginx_config(file_path: str) -> dict:
         prefer_match = re.search(r'ssl_prefer_server_ciphers\s+(on|off);', content, re.IGNORECASE)
         if prefer_match:
             result['ssl_prefer_server_ciphers'] = prefer_match.group(1).lower()
+
+        # 查找 ssl_ecdh_curve
+        ecdh_match = re.search(r'ssl_ecdh_curve\s+([^;]+);', content)
+        if ecdh_match:
+            result['ssl_ecdh_curve'] = ecdh_match.group(1).strip()
+
+        # 查找 ssl_conf_command Ciphersuites (TLS 1.3)
+        ciphersuites_match = re.search(r'ssl_conf_command\s+Ciphersuites\s+([^;]+);', content)
+        if ciphersuites_match:
+            result['ssl_conf_command_ciphersuites'] = ciphersuites_match.group(1).strip()
 
     except Exception as e:
         print(f"Error reading config file: {e}")
@@ -93,15 +107,25 @@ def compare_config(current: dict) -> dict:
         issues.append(("协议版本", current['ssl_protocols'], RECOMMENDED_PROTOCOLS))
         fixes.append("更新 ssl_protocols")
 
-    # 检查加密套件
-    if current['ssl_ciphers'] != RECOMMENDED_CIPHERS:
-        issues.append(("加密套件", current['ssl_ciphers'], RECOMMENDED_CIPHERS))
-        fixes.append("更新 ssl_ciphers")
+    # 检查 ssl_ciphers (TLS 1.2)
+    if current['ssl_ciphers'] != RECOMMENDED_CIPHERS_TLS12:
+        issues.append(("TLS 1.2 加密套件", current['ssl_ciphers'], RECOMMENDED_CIPHERS_TLS12))
+        fixes.append("更新 ssl_ciphers (TLS 1.2)")
+
+    # 检查 ssl_conf_command Ciphersuites (TLS 1.3)
+    if current['ssl_conf_command_ciphersuites'] != RECOMMENDED_CIPHERSUITES_TLS13:
+        issues.append(("TLS 1.3 加密套件", current['ssl_conf_command_ciphersuites'], RECOMMENDED_CIPHERSUITES_TLS13))
+        fixes.append("更新 ssl_conf_command Ciphersuites (TLS 1.3)")
 
     # 检查 ssl_prefer_server_ciphers
     if current['ssl_prefer_server_ciphers'] != 'on':
         issues.append(("服务端优先", current['ssl_prefer_server_ciphers'], 'on'))
         fixes.append("设置 ssl_prefer_server_ciphers on")
+
+    # 检查 ssl_ecdh_curve
+    if current['ssl_ecdh_curve'] != RECOMMENDED_ECDH_CURVE:
+        issues.append(("ECDH 曲线", current['ssl_ecdh_curve'], RECOMMENDED_ECDH_CURVE))
+        fixes.append("设置 ssl_ecdh_curve")
 
     return {
         'needs_update': len(issues) > 0,
@@ -129,24 +153,9 @@ def update_nginx_config(file_path: str) -> Tuple[bool, str]:
                 content
             )
         else:
-            # 在 http 块中添加
             content = re.sub(
                 r'(\s*http\s*\{)',
                 r'\1\n    ssl_protocols TLSv1.2 TLSv1.3;',
-                content
-            )
-
-        # 更新或添加 ssl_ciphers
-        if re.search(r'ssl_ciphers\s+[^;]+;', content):
-            content = re.sub(
-                r'ssl_ciphers\s+[^;]+;',
-                f'ssl_ciphers {RECOMMENDED_CIPHERS};',
-                content
-            )
-        else:
-            content = re.sub(
-                r'(\s*http\s*\{)',
-                fr'\1\n    ssl_ciphers {RECOMMENDED_CIPHERS};',
                 content
             )
 
@@ -162,6 +171,48 @@ def update_nginx_config(file_path: str) -> Tuple[bool, str]:
             content = re.sub(
                 r'(\s*http\s*\{)',
                 r'\1\n    ssl_prefer_server_ciphers on;',
+                content
+            )
+
+        # 更新或添加 ssl_ecdh_curve
+        if re.search(r'ssl_ecdh_curve\s+[^;]+;', content):
+            content = re.sub(
+                r'ssl_ecdh_curve\s+[^;]+;',
+                f'ssl_ecdh_curve {RECOMMENDED_ECDH_CURVE};',
+                content
+            )
+        else:
+            content = re.sub(
+                r'(\s*http\s*\{)',
+                fr'\1\n    ssl_ecdh_curve {RECOMMENDED_ECDH_CURVE};',
+                content
+            )
+
+        # 更新或添加 ssl_conf_command Ciphersuites (TLS 1.3)
+        if re.search(r'ssl_conf_command\s+Ciphersuites\s+[^;]+;', content):
+            content = re.sub(
+                r'ssl_conf_command\s+Ciphersuites\s+[^;]+;',
+                f'ssl_conf_command Ciphersuites {RECOMMENDED_CIPHERSUITES_TLS13};',
+                content
+            )
+        else:
+            content = re.sub(
+                r'(\s*http\s*\{)',
+                fr'\1\n    ssl_conf_command Ciphersuites {RECOMMENDED_CIPHERSUITES_TLS13};',
+                content
+            )
+
+        # 更新或添加 ssl_ciphers (TLS 1.2)
+        if re.search(r'ssl_ciphers\s+[^;]+;', content):
+            content = re.sub(
+                r'ssl_ciphers\s+[^;]+;',
+                f'ssl_ciphers {RECOMMENDED_CIPHERS_TLS12};',
+                content
+            )
+        else:
+            content = re.sub(
+                r'(\s*http\s*\{)',
+                fr'\1\n    ssl_ciphers {RECOMMENDED_CIPHERS_TLS12};',
                 content
             )
 
@@ -196,13 +247,17 @@ def print_status(current_config: dict, comparison: dict, config_path: str):
 
     print("### 当前配置")
     print(f"- ssl_protocols: {current_config['ssl_protocols'] or '(未设置)'}")
-    print(f"- ssl_ciphers: {current_config['ssl_ciphers'] or '(未设置)'}")
+    print(f"- ssl_ciphers (TLS 1.2): {current_config['ssl_ciphers'] or '(未设置)'}")
+    print(f"- ssl_conf_command Ciphersuites (TLS 1.3): {current_config['ssl_conf_command_ciphersuites'] or '(未设置)'}")
     print(f"- ssl_prefer_server_ciphers: {current_config['ssl_prefer_server_ciphers'] or '(未设置)'}")
+    print(f"- ssl_ecdh_curve: {current_config['ssl_ecdh_curve'] or '(未设置)'}")
 
     print("\n### 推荐配置")
     print(f"- ssl_protocols: {RECOMMENDED_PROTOCOLS}")
-    print(f"- ssl_ciphers: {RECOMMENDED_CIPHERS}")
+    print(f"- ssl_ciphers (TLS 1.2): {RECOMMENDED_CIPHERS_TLS12}")
+    print(f"- ssl_conf_command Ciphersuites (TLS 1.3): {RECOMMENDED_CIPHERSUITES_TLS13}")
     print(f"- ssl_prefer_server_ciphers: on")
+    print(f"- ssl_ecdh_curve: {RECOMMENDED_ECDH_CURVE}")
 
     if comparison['needs_update']:
         print("\n### 差异")
