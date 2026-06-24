@@ -5,6 +5,7 @@ This repository shares skills I've accumulated through practical experience. I'm
 ## What's here?
 
 - **nginx-cipher-optimizer** - A tool to optimize SSL/TLS cipher configurations for Nginx
+- **systemd-service-generator** - Generate systemd service unit files for Debian systems
 
 ## About
 
